@@ -11,9 +11,8 @@ bevy_ci_testing = ["bevy/bevy_ci_testing"]
 trace_tracy = ["bevy/trace_tracy"]
 
 [dependencies]
-bevy = {version = "0.7.0-dev", path = "../bevy"}
+bevy = { version = "0.7.0-dev", git = "https://github.com/bevyengine/bevy", branch = "main" }
 
 [dev-dependencies]
 bytemuck = "1.9.1"
 rand = "0.8.5"
-smooth-bevy-cameras = { path = "../smooth-bevy-cameras" }
