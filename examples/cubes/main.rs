@@ -1,5 +1,4 @@
 use bevy::{
-    asset::AssetServerSettings,
     core_pipeline::draw_3d_graph,
     diagnostic::{FrameTimeDiagnosticsPlugin, LogDiagnosticsPlugin},
     ecs::system::{
@@ -23,8 +22,8 @@ use bevy::{
             BindGroupLayoutDescriptor, BindGroupLayoutEntry, BindingType, BlendState, Buffer,
             BufferBindingType, BufferInitDescriptor, BufferSize, BufferUsages, BufferVec,
             CachedRenderPipelineId, ColorTargetState, ColorWrites, CompareFunction, DepthBiasState,
-            DepthStencilState, Face, FragmentState, FrontFace, IndexFormat, LoadOp,
-            MultisampleState, Operations, PipelineCache, PolygonMode, PrimitiveState,
+            DepthStencilState, FragmentState, FrontFace, IndexFormat, LoadOp, MultisampleState,
+            Operations, PipelineCache, PolygonMode, PrimitiveState,
             RenderPassDepthStencilAttachment, RenderPassDescriptor, RenderPipelineDescriptor,
             ShaderStages, StencilFaceState, StencilState, TextureFormat, VertexState,
         },
