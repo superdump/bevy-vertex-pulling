@@ -15,4 +15,5 @@ bevy = { version = "0.8.0-dev", git = "https://github.com/bevyengine/bevy", bran
 
 [dev-dependencies]
 bytemuck = "1.9.1"
+examples_utils = { path = "examples_utils", version = "0.8.0-dev" }
 rand = "0.8.5"
