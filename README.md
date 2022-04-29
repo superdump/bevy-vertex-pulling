@@ -32,6 +32,7 @@ Vertex pulling is a useful and efficient technique for drawing many quads or cub
 - [ ] Compute shader software rasterisation when the shape is small on-screen as raster shades fragments using 2x2 'pixel quads'
   - https://research.nvidia.com/publication/2011-08_high-performance-software-rasterization-gpus
   - https://raphlinus.github.io/
+  - https://www.cg.tuwien.ac.at/research/publications/2021/SCHUETZ-2021-PCC/
 
 ## License
 
