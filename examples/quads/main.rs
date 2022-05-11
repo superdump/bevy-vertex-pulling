@@ -191,7 +191,7 @@ fn prepare_quads(
         gpu_quads.index_count = gpu_quads.instances.len() as u32 * 6;
         let mut indices = Vec::with_capacity(gpu_quads.index_count as usize);
         for i in 0..gpu_quads.instances.len() {
-            let base = (i * 6) as u32;
+            let base = (i * 4) as u32;
             indices.push(base + 2);
             indices.push(base);
             indices.push(base + 1);

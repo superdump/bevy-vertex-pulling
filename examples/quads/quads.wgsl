@@ -38,7 +38,7 @@ struct VertexOutput {
 fn vertex([[builtin(vertex_index)]] vertex_index: u32) -> VertexOutput {
     var out: VertexOutput;
 
-    let instance_index = vertex_index / 6u;
+    let instance_index = vertex_index >> 2u;
     let quad = quads.data[instance_index];
 
     let xyz = vec3<i32>(i32(vertex_index & 0x1u), i32((vertex_index & 0x2u) >> 1u), 0);
