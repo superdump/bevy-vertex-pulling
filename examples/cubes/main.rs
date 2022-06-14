@@ -1,16 +1,14 @@
 use bevy::{
-    core_pipeline::draw_3d_graph,
+    core_pipeline::core_3d,
     diagnostic::{FrameTimeDiagnosticsPlugin, LogDiagnosticsPlugin},
     ecs::system::{
         lifetimeless::{Read, SQuery, SRes},
         SystemParamItem,
     },
-    input::mouse::MouseMotion,
     pbr::SetShadowViewBindGroup,
     prelude::*,
     reflect::TypeUuid,
     render::{
-        camera::{ActiveCamera, Camera3d},
         mesh::PrimitiveTopology,
         render_graph::{self, NodeRunError, RenderGraph, RenderGraphContext, SlotInfo, SlotType},
         render_phase::{
@@ -18,14 +16,14 @@ use bevy::{
             PhaseItem, RenderCommand, RenderCommandResult, RenderPhase, TrackedRenderPass,
         },
         render_resource::{
-            std140::AsStd140, BindGroup, BindGroupDescriptor, BindGroupEntry, BindGroupLayout,
+            BindGroup, BindGroupDescriptor, BindGroupEntry, BindGroupLayout,
             BindGroupLayoutDescriptor, BindGroupLayoutEntry, BindingType, BlendState, Buffer,
             BufferBindingType, BufferInitDescriptor, BufferSize, BufferUsages, BufferVec,
             CachedRenderPipelineId, ColorTargetState, ColorWrites, CompareFunction, DepthBiasState,
             DepthStencilState, FragmentState, FrontFace, IndexFormat, LoadOp, MultisampleState,
             Operations, PipelineCache, PolygonMode, PrimitiveState,
             RenderPassDepthStencilAttachment, RenderPassDescriptor, RenderPipelineDescriptor,
-            ShaderStages, StencilFaceState, StencilState, TextureFormat, VertexState,
+            ShaderStages, ShaderType, StencilFaceState, StencilState, TextureFormat, VertexState,
         },
         renderer::{RenderContext, RenderDevice, RenderQueue},
         texture::BevyDefault,
@@ -123,7 +121,7 @@ fn setup(mut commands: Commands) {
     commands.spawn_bundle((cubes,));
 
     commands
-        .spawn_bundle(PerspectiveCameraBundle {
+        .spawn_bundle(Camera3dBundle {
             transform: Transform::from_translation(100.0 * Vec3::new(-1.0, 1.0, -1.0))
                 .looking_at(0.5 * Vec3::new(dim as f32, 0.0, dim as f32), Vec3::Y),
             ..default()
@@ -131,8 +129,8 @@ fn setup(mut commands: Commands) {
         .insert(CameraController::default());
 }
 
-fn extract_cubes_phase(mut commands: Commands, active_3d: Res<ActiveCamera<Camera3d>>) {
-    if let Some(entity) = active_3d.get() {
+fn extract_cubes_phase(mut commands: Commands, cameras: Query<Entity, With<Camera3d>>) {
+    for entity in cameras.iter() {
         commands
             .get_or_spawn(entity)
             .insert(RenderPhase::<CubesPhaseItem>::default());
@@ -421,15 +419,15 @@ impl Plugin for CubesPlugin {
 
         let cubes_pass_node = CubesPassNode::new(&mut render_app.world);
         let mut graph = render_app.world.resource_mut::<RenderGraph>();
-        let draw_3d_graph = graph.get_sub_graph_mut(draw_3d_graph::NAME).unwrap();
+        let draw_3d_graph = graph.get_sub_graph_mut(core_3d::graph::NAME).unwrap();
         draw_3d_graph.add_node(node::CUBES_PASS, cubes_pass_node);
         draw_3d_graph
-            .add_node_edge(node::CUBES_PASS, draw_3d_graph::node::MAIN_PASS)
+            .add_node_edge(core_3d::graph::node::MAIN_PASS, node::CUBES_PASS)
             .unwrap();
         draw_3d_graph
             .add_slot_edge(
                 draw_3d_graph.input_node().unwrap().id,
-                draw_3d_graph::input::VIEW_ENTITY,
+                core_3d::graph::input::VIEW_ENTITY,
                 node::CUBES_PASS,
                 CubesPassNode::IN_VIEW,
             )
@@ -459,9 +457,7 @@ impl FromWorld for CubesPipeline {
                             ty: BindingType::Buffer {
                                 ty: BufferBindingType::Uniform,
                                 has_dynamic_offset: true,
-                                min_binding_size: BufferSize::new(
-                                    ViewUniform::std140_size_static() as u64,
-                                ),
+                                min_binding_size: Some(ViewUniform::min_size()),
                             },
                             count: None,
                         },
