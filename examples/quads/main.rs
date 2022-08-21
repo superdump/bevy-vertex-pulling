@@ -19,12 +19,13 @@ use bevy::{
         render_resource::{
             BindGroup, BindGroupDescriptor, BindGroupEntry, BindGroupLayout,
             BindGroupLayoutDescriptor, BindGroupLayoutEntry, BindingType, BlendState, Buffer,
-            BufferBindingType, BufferInitDescriptor, BufferSize, BufferUsages, BufferVec,
+            BufferBindingType, BufferInitDescriptor, BufferSize, BufferUsages,
             CachedRenderPipelineId, ColorTargetState, ColorWrites, CompareFunction, DepthBiasState,
             DepthStencilState, Face, FragmentState, FrontFace, IndexFormat, LoadOp,
             MultisampleState, Operations, PipelineCache, PolygonMode, PrimitiveState,
             RenderPassDepthStencilAttachment, RenderPassDescriptor, RenderPipelineDescriptor,
-            ShaderStages, ShaderType, StencilFaceState, StencilState, TextureFormat, VertexState,
+            ShaderStages, ShaderType, StencilFaceState, StencilState, StorageBuffer, TextureFormat,
+            VertexState,
         },
         renderer::{RenderContext, RenderDevice, RenderQueue},
         texture::BevyDefault,
@@ -32,7 +33,7 @@ use bevy::{
         Extract, RenderApp, RenderStage,
     },
 };
-use bytemuck::{cast_slice, Pod, Zeroable};
+use bytemuck::cast_slice;
 use examples_utils::camera::{CameraController, CameraControllerPlugin};
 use rand::Rng;
 
@@ -62,14 +63,16 @@ struct Quad {
     color: Color,
     center: Vec3,
     half_extents: Vec3,
+    billboard: bool,
 }
 
 impl Quad {
-    pub fn random<R: Rng + ?Sized>(rng: &mut R, min: Vec3, max: Vec3) -> Self {
+    pub fn random<R: Rng + ?Sized>(rng: &mut R, min: Vec3, max: Vec3, billboard: bool) -> Self {
         Self {
             color: Color::WHITE,
             center: random_point_vec3(rng, min, max),
             half_extents: 0.01 * Vec3::ONE,
+            billboard,
         }
     }
 }
@@ -105,7 +108,7 @@ fn setup(mut commands: Commands) {
         .unwrap_or(1_000_000);
     info!("Generating {} quads", n_quads);
     for _ in 0..n_quads {
-        quads.data.push(Quad::random(&mut rng, min, max));
+        quads.data.push(Quad::random(&mut rng, min, max, true));
     }
     commands.insert_resource(quads);
 }
@@ -118,10 +121,18 @@ fn extract_quads_phase(mut commands: Commands, cameras: Extract<Query<Entity, Wi
     }
 }
 
-#[derive(Clone, Copy, Debug, Default, Pod, Zeroable)]
-#[repr(C)]
+// NOTE: These must match the bit flags in quads.wgsl!
+bitflags::bitflags! {
+    #[repr(transparent)]
+    pub struct GpuQuadFlags: u32 {
+        const BILLBOARD = (1 << 0);
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, ShaderType)]
 struct GpuQuad {
-    center: Vec4,
+    center: Vec3,
+    flags: u32,
     half_extents: Vec4,
     color: [f32; 4],
 }
@@ -129,27 +140,40 @@ struct GpuQuad {
 impl From<&Quad> for GpuQuad {
     fn from(quad: &Quad) -> Self {
         Self {
-            center: quad.center.extend(1.0),
+            center: quad.center,
+            flags: if quad.billboard {
+                GpuQuadFlags::BILLBOARD
+            } else {
+                GpuQuadFlags::empty()
+            }
+            .bits,
             half_extents: quad.half_extents.extend(0.0),
             color: quad.color.as_rgba_f32(),
         }
     }
 }
 
-#[derive(Component)]
 struct GpuQuads {
     index_buffer: Option<Buffer>,
     index_count: u32,
-    instances: BufferVec<GpuQuad>,
+    instances: StorageBuffer<GpuQuadsArray>,
     bind_group: Option<BindGroup>,
+}
+
+#[derive(Default, ShaderType)]
+struct GpuQuadsArray {
+    #[size(runtime)]
+    array: Vec<GpuQuad>,
 }
 
 impl Default for GpuQuads {
     fn default() -> Self {
+        let mut instances = StorageBuffer::<GpuQuadsArray>::default();
+        instances.set_label(Some("gpu_quads_array"));
         Self {
             index_buffer: None,
             index_count: 0,
-            instances: BufferVec::<GpuQuad>::new(BufferUsages::STORAGE),
+            instances,
             bind_group: None,
         }
     }
@@ -172,11 +196,16 @@ fn prepare_quads(
                 new_gpu_quads.as_mut().unwrap()
             };
             for quad in quads.data.iter() {
-                gpu_quads.instances.push(GpuQuad::from(quad));
+                gpu_quads
+                    .instances
+                    .get_mut()
+                    .array
+                    .push(GpuQuad::from(quad));
             }
-            gpu_quads.index_count = gpu_quads.instances.len() as u32 * 6;
+            let n_instances = gpu_quads.instances.get().array.len();
+            gpu_quads.index_count = n_instances as u32 * 6;
             let mut indices = Vec::with_capacity(gpu_quads.index_count as usize);
-            for i in 0..gpu_quads.instances.len() {
+            for i in 0..n_instances {
                 let base = (i * 4) as u32;
                 indices.push(base + 2);
                 indices.push(base);
