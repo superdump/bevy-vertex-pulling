@@ -59,19 +59,36 @@ fn main() {
 }
 
 #[derive(Clone, Debug, Default)]
+pub enum Billboard {
+    #[default]
+    None,
+    ViewY,
+    WorldY,
+    FixedScreenSize,
+}
+
+#[derive(Clone, Debug, Default)]
 struct Quad {
     color: Color,
     center: Vec3,
+    /// Half-extents are in world units except for in Billboard::FixedScreenSize mode, then they are
+    /// in screen pixels
     half_extents: Vec3,
-    billboard: bool,
+    billboard: Billboard,
 }
 
 impl Quad {
-    pub fn random<R: Rng + ?Sized>(rng: &mut R, min: Vec3, max: Vec3, billboard: bool) -> Self {
+    pub fn random<R: Rng + ?Sized>(
+        rng: &mut R,
+        min: Vec3,
+        max: Vec3,
+        half_extents: Vec3,
+        billboard: Billboard,
+    ) -> Self {
         Self {
             color: Color::WHITE,
             center: random_point_vec3(rng, min, max),
-            half_extents: 0.01 * Vec3::ONE,
+            half_extents,
             billboard,
         }
     }
@@ -108,7 +125,13 @@ fn setup(mut commands: Commands) {
         .unwrap_or(1_000_000);
     info!("Generating {} quads", n_quads);
     for _ in 0..n_quads {
-        quads.data.push(Quad::random(&mut rng, min, max, true));
+        quads.data.push(Quad::random(
+            &mut rng,
+            min,
+            max,
+            0.01 * Vec3::ONE,
+            Billboard::ViewY,
+        ));
     }
     commands.insert_resource(quads);
 }
@@ -125,7 +148,9 @@ fn extract_quads_phase(mut commands: Commands, cameras: Extract<Query<Entity, Wi
 bitflags::bitflags! {
     #[repr(transparent)]
     pub struct GpuQuadFlags: u32 {
-        const BILLBOARD = (1 << 0);
+        const BILLBOARD                   = (1 << 0);
+        const BILLBOARD_WORLD_Y           = (1 << 1);
+        const BILLBOARD_FIXED_SCREEN_SIZE = (1 << 2);
     }
 }
 
@@ -141,10 +166,11 @@ impl From<&Quad> for GpuQuad {
     fn from(quad: &Quad) -> Self {
         Self {
             center: quad.center,
-            flags: if quad.billboard {
-                GpuQuadFlags::BILLBOARD
-            } else {
-                GpuQuadFlags::empty()
+            flags: match quad.billboard {
+                Billboard::None => GpuQuadFlags::empty(),
+                Billboard::ViewY => GpuQuadFlags::BILLBOARD,
+                Billboard::WorldY => GpuQuadFlags::BILLBOARD | GpuQuadFlags::BILLBOARD_WORLD_Y,
+                Billboard::FixedScreenSize => GpuQuadFlags::BILLBOARD_FIXED_SCREEN_SIZE,
             }
             .bits,
             half_extents: quad.half_extents.extend(0.0),
