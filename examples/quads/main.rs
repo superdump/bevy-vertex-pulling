@@ -5,15 +5,16 @@ use bevy::{
         lifetimeless::{Read, SQuery, SRes},
         SystemParamItem,
     },
-    pbr::SetShadowViewBindGroup,
+    pbr::LightMeta,
     prelude::*,
     reflect::TypeUuid,
     render::{
+        extract_resource::{ExtractResource, ExtractResourcePlugin},
         mesh::PrimitiveTopology,
         render_graph::{self, NodeRunError, RenderGraph, RenderGraphContext, SlotInfo, SlotType},
         render_phase::{
-            AddRenderCommand, DrawFunctionId, DrawFunctions, EntityPhaseItem, EntityRenderCommand,
-            PhaseItem, RenderCommand, RenderCommandResult, RenderPhase, TrackedRenderPass,
+            AddRenderCommand, DrawFunctionId, DrawFunctions, PhaseItem, RenderCommand,
+            RenderCommandResult, RenderPhase, TrackedRenderPass,
         },
         render_resource::{
             BindGroup, BindGroupDescriptor, BindGroupEntry, BindGroupLayout,
@@ -27,8 +28,8 @@ use bevy::{
         },
         renderer::{RenderContext, RenderDevice, RenderQueue},
         texture::BevyDefault,
-        view::{ExtractedView, ViewDepthTexture, ViewTarget, ViewUniform},
-        RenderApp, RenderStage,
+        view::{ExtractedView, ViewDepthTexture, ViewTarget, ViewUniform, ViewUniformOffset},
+        Extract, RenderApp, RenderStage,
     },
 };
 use bytemuck::{cast_slice, Pod, Zeroable};
@@ -81,10 +82,9 @@ fn random_point_vec3<R: Rng + ?Sized>(rng: &mut R, min: Vec3, max: Vec3) -> Vec3
     )
 }
 
-#[derive(Clone, Component, Debug, Default)]
+#[derive(Clone, Debug, Default, ExtractResource)]
 struct Quads {
     data: Vec<Quad>,
-    extracted: bool,
 }
 
 fn setup(mut commands: Commands) {
@@ -107,29 +107,14 @@ fn setup(mut commands: Commands) {
     for _ in 0..n_quads {
         quads.data.push(Quad::random(&mut rng, min, max));
     }
-    commands.spawn_bundle((quads,));
+    commands.insert_resource(quads);
 }
 
-fn extract_quads_phase(mut commands: Commands, cameras: Query<Entity, With<Camera3d>>) {
+fn extract_quads_phase(mut commands: Commands, cameras: Extract<Query<Entity, With<Camera3d>>>) {
     for entity in cameras.iter() {
         commands
             .get_or_spawn(entity)
             .insert(RenderPhase::<QuadsPhaseItem>::default());
-    }
-}
-
-fn extract_quads(mut commands: Commands, mut quads: Query<(Entity, &mut Quads)>) {
-    for (entity, mut quads) in quads.iter_mut() {
-        if quads.extracted {
-            commands.get_or_spawn(entity).insert(Quads {
-                data: Vec::new(),
-                extracted: true,
-            });
-        } else {
-            commands.get_or_spawn(entity).insert(quads.clone());
-            // NOTE: Set this after cloning so we don't extract next time
-            quads.extracted = true;
-        }
     }
 }
 
@@ -156,6 +141,7 @@ struct GpuQuads {
     index_buffer: Option<Buffer>,
     index_count: u32,
     instances: BufferVec<GpuQuad>,
+    bind_group: Option<BindGroup>,
 }
 
 impl Default for GpuQuads {
@@ -164,55 +150,61 @@ impl Default for GpuQuads {
             index_buffer: None,
             index_count: 0,
             instances: BufferVec::<GpuQuad>::new(BufferUsages::STORAGE),
+            bind_group: None,
         }
     }
 }
 
-#[derive(Component)]
-struct GpuQuadsBindGroup {
-    bind_group: BindGroup,
-}
-
 fn prepare_quads(
-    quads: Query<&Quads>,
+    mut commands: Commands,
+    quads: Option<Res<Quads>>,
     render_device: Res<RenderDevice>,
     render_queue: Res<RenderQueue>,
-    mut gpu_quads: ResMut<GpuQuads>,
+    gpu_quads: Option<ResMut<GpuQuads>>,
 ) {
-    for quads in quads.iter() {
-        if quads.extracted {
-            continue;
-        }
-        for quad in quads.data.iter() {
-            gpu_quads.instances.push(GpuQuad::from(quad));
-        }
-        gpu_quads.index_count = gpu_quads.instances.len() as u32 * 6;
-        let mut indices = Vec::with_capacity(gpu_quads.index_count as usize);
-        for i in 0..gpu_quads.instances.len() {
-            let base = (i * 4) as u32;
-            indices.push(base + 2);
-            indices.push(base);
-            indices.push(base + 1);
-            indices.push(base + 1);
-            indices.push(base + 3);
-            indices.push(base + 2);
-        }
-        gpu_quads.index_buffer = Some(render_device.create_buffer_with_data(
-            &BufferInitDescriptor {
-                label: Some("gpu_quads_index_buffer"),
-                contents: cast_slice(&indices),
-                usage: BufferUsages::INDEX,
-            },
-        ));
+    if let Some(quads) = quads {
+        if quads.is_changed() {
+            let mut new_gpu_quads = None;
+            let gpu_quads = if let Some(gpu_quads) = gpu_quads {
+                gpu_quads.into_inner()
+            } else {
+                new_gpu_quads = Some(GpuQuads::default());
+                new_gpu_quads.as_mut().unwrap()
+            };
+            for quad in quads.data.iter() {
+                gpu_quads.instances.push(GpuQuad::from(quad));
+            }
+            gpu_quads.index_count = gpu_quads.instances.len() as u32 * 6;
+            let mut indices = Vec::with_capacity(gpu_quads.index_count as usize);
+            for i in 0..gpu_quads.instances.len() {
+                let base = (i * 4) as u32;
+                indices.push(base + 2);
+                indices.push(base);
+                indices.push(base + 1);
+                indices.push(base + 1);
+                indices.push(base + 3);
+                indices.push(base + 2);
+            }
+            gpu_quads.index_buffer = Some(render_device.create_buffer_with_data(
+                &BufferInitDescriptor {
+                    label: Some("gpu_quads_index_buffer"),
+                    contents: cast_slice(&indices),
+                    usage: BufferUsages::INDEX,
+                },
+            ));
 
-        gpu_quads
-            .instances
-            .write_buffer(&*render_device, &*render_queue);
+            gpu_quads
+                .instances
+                .write_buffer(&*render_device, &*render_queue);
+
+            if let Some(new_gpu_quads) = new_gpu_quads {
+                commands.insert_resource(new_gpu_quads);
+            }
+        }
     }
 }
 
 pub struct QuadsPhaseItem {
-    pub entity: Entity,
     pub draw_function: DrawFunctionId,
 }
 
@@ -230,43 +222,33 @@ impl PhaseItem for QuadsPhaseItem {
     }
 }
 
-impl EntityPhaseItem for QuadsPhaseItem {
-    #[inline]
-    fn entity(&self) -> Entity {
-        self.entity
-    }
-}
-
 fn queue_quads(
-    mut commands: Commands,
     opaque_3d_draw_functions: Res<DrawFunctions<QuadsPhaseItem>>,
     quads_pipeline: Res<QuadsPipeline>,
     render_device: Res<RenderDevice>,
-    quads_query: Query<Entity, With<Quads>>,
-    gpu_quads: Res<GpuQuads>,
+    gpu_quads: Option<ResMut<GpuQuads>>,
     mut views: Query<&mut RenderPhase<QuadsPhaseItem>>,
 ) {
-    let draw_quads = opaque_3d_draw_functions
-        .read()
-        .get_id::<DrawQuads>()
-        .unwrap();
+    if let Some(mut gpu_quads) = gpu_quads {
+        let draw_quads = opaque_3d_draw_functions
+            .read()
+            .get_id::<DrawQuads>()
+            .unwrap();
 
-    for mut opaque_phase in views.iter_mut() {
-        for entity in quads_query.iter() {
-            commands
-                .get_or_spawn(entity)
-                .insert_bundle((GpuQuadsBindGroup {
-                    bind_group: render_device.create_bind_group(&BindGroupDescriptor {
-                        label: Some("gpu_quads_bind_group"),
-                        layout: &quads_pipeline.quads_layout,
-                        entries: &[BindGroupEntry {
-                            binding: 0,
-                            resource: gpu_quads.instances.buffer().unwrap().as_entire_binding(),
-                        }],
-                    }),
-                },));
+        if gpu_quads.is_changed() {
+            println!("GpuQuads changed");
+            gpu_quads.bind_group = Some(render_device.create_bind_group(&BindGroupDescriptor {
+                label: Some("gpu_quads_bind_group"),
+                layout: &quads_pipeline.quads_layout,
+                entries: &[BindGroupEntry {
+                    binding: 0,
+                    resource: gpu_quads.instances.buffer().unwrap().as_entire_binding(),
+                }],
+            }));
+        }
+
+        for mut opaque_phase in views.iter_mut() {
             opaque_phase.add(QuadsPhaseItem {
-                entity,
                 draw_function: draw_quads,
             });
         }
@@ -325,10 +307,10 @@ impl render_graph::Node for QuadsPassNode {
             label: Some("main_quads_pass"),
             // NOTE: The quads pass loads the color
             // buffer as well as writing to it.
-            color_attachments: &[target.get_color_attachment(Operations {
+            color_attachments: &[Some(target.get_color_attachment(Operations {
                 load: LoadOp::Load,
                 store: true,
-            })],
+            }))],
             depth_stencil_attachment: Some(RenderPassDepthStencilAttachment {
                 view: &depth.view,
                 // NOTE: The quads main pass loads the depth buffer and possibly overwrites it
@@ -364,6 +346,7 @@ impl Plugin for QuadsPlugin {
             QUADS_SHADER_HANDLE,
             Shader::from_wgsl(include_str!("quads.wgsl")),
         );
+        app.add_plugin(ExtractResourcePlugin::<Quads>::default());
 
         let render_app = app.sub_app_mut(RenderApp);
 
@@ -371,9 +354,7 @@ impl Plugin for QuadsPlugin {
             .init_resource::<DrawFunctions<QuadsPhaseItem>>()
             .add_render_command::<QuadsPhaseItem, DrawQuads>()
             .init_resource::<QuadsPipeline>()
-            .init_resource::<GpuQuads>()
             .add_system_to_stage(RenderStage::Extract, extract_quads_phase)
-            .add_system_to_stage(RenderStage::Extract, extract_quads)
             .add_system_to_stage(RenderStage::Prepare, prepare_quads)
             .add_system_to_stage(RenderStage::Queue, queue_quads);
 
@@ -456,11 +437,11 @@ impl FromWorld for QuadsPipeline {
                 shader: QUADS_SHADER_HANDLE.typed(),
                 shader_defs: vec![],
                 entry_point: "fragment".into(),
-                targets: vec![ColorTargetState {
+                targets: vec![Some(ColorTargetState {
                     format: TextureFormat::bevy_default(),
                     blend: Some(BlendState::REPLACE),
                     write_mask: ColorWrites::ALL,
-                }],
+                })],
             }),
             primitive: PrimitiveState {
                 front_face: FrontFace::Ccw,
@@ -503,7 +484,7 @@ impl FromWorld for QuadsPipeline {
 
 type DrawQuads = (
     SetQuadsPipeline,
-    SetShadowViewBindGroup<0>,
+    SetQuadsShadowViewBindGroup<0>,
     SetGpuQuadsBindGroup<1>,
     DrawVertexPulledQuads,
 );
@@ -531,32 +512,57 @@ impl<P: PhaseItem> RenderCommand<P> for SetQuadsPipeline {
     }
 }
 
+pub struct SetQuadsShadowViewBindGroup<const I: usize>;
+impl<const I: usize, P: PhaseItem> RenderCommand<P> for SetQuadsShadowViewBindGroup<I> {
+    type Param = (SRes<LightMeta>, SQuery<Read<ViewUniformOffset>>);
+    #[inline]
+    fn render<'w>(
+        view: Entity,
+        _item: &P,
+        (light_meta, view_query): SystemParamItem<'w, '_, Self::Param>,
+        pass: &mut TrackedRenderPass<'w>,
+    ) -> RenderCommandResult {
+        let view_uniform_offset = view_query.get(view).unwrap();
+        pass.set_bind_group(
+            I,
+            light_meta
+                .into_inner()
+                .shadow_view_bind_group
+                .as_ref()
+                .unwrap(),
+            &[view_uniform_offset.offset],
+        );
+
+        RenderCommandResult::Success
+    }
+}
+
 struct SetGpuQuadsBindGroup<const I: usize>;
-impl<const I: usize> EntityRenderCommand for SetGpuQuadsBindGroup<I> {
-    type Param = SQuery<Read<GpuQuadsBindGroup>>;
+impl<const I: usize, P: PhaseItem> RenderCommand<P> for SetGpuQuadsBindGroup<I> {
+    type Param = SRes<GpuQuads>;
 
     #[inline]
     fn render<'w>(
         _view: Entity,
-        item: Entity,
-        gpu_quads_bind_groups: SystemParamItem<'w, '_, Self::Param>,
+        _item: &P,
+        gpu_quads: SystemParamItem<'w, '_, Self::Param>,
         pass: &mut TrackedRenderPass<'w>,
     ) -> RenderCommandResult {
-        let gpu_quads_bind_group = gpu_quads_bind_groups.get_inner(item).unwrap();
-        pass.set_bind_group(I, &gpu_quads_bind_group.bind_group, &[]);
+        let gpu_quads = gpu_quads.into_inner();
+        pass.set_bind_group(I, gpu_quads.bind_group.as_ref().unwrap(), &[]);
 
         RenderCommandResult::Success
     }
 }
 
 struct DrawVertexPulledQuads;
-impl EntityRenderCommand for DrawVertexPulledQuads {
+impl<P: PhaseItem> RenderCommand<P> for DrawVertexPulledQuads {
     type Param = SRes<GpuQuads>;
 
     #[inline]
     fn render<'w>(
         _view: Entity,
-        _item: Entity,
+        _item: &P,
         gpu_quads: SystemParamItem<'w, '_, Self::Param>,
         pass: &mut TrackedRenderPass<'w>,
     ) -> RenderCommandResult {
