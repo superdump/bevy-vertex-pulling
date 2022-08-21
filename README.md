@@ -6,6 +6,7 @@ Vertex pulling is a useful and efficient technique for drawing many quads or cub
 
 - Instance data stored in:
   - Storage buffer
+  - Instance-rate vertex buffer
 - Shapes
   - Quads
   - Cuboids/voxels
@@ -23,9 +24,9 @@ Vertex pulling is a useful and efficient technique for drawing many quads or cub
     - [ ] Triangle mesh to draw quads and `discard` like alpha mask
     - [ ] Bevy circular texture with a triangle mesh and `discard` like alpha mask
     - [ ] Bevy circular texture with a circular mesh
-- [ ] Support more basic shapes
+- [ ] Support more kinds of basic shapes
 - [ ] Support complex meshes
-- [ ] Billboarding (make the planar shape face the camera)
+- [x] Billboarding (make the planar shape face the camera)
 - [ ] Culling
   - [ ] Compute shader-based frustum culling
   - [ ] Compute shader-based occlusion culling
