@@ -28,8 +28,9 @@ use bevy::{
         renderer::{RenderContext, RenderDevice, RenderQueue},
         texture::BevyDefault,
         view::{ExtractedView, ViewDepthTexture, ViewTarget, ViewUniform},
-        RenderApp, RenderStage,
+        Extract, RenderApp, RenderStage,
     },
+    utils::HashSet,
 };
 use bytemuck::{cast_slice, Pod, Zeroable};
 use examples_utils::camera::{CameraController, CameraControllerPlugin};
@@ -37,17 +38,19 @@ use rand::Rng;
 
 fn main() {
     App::new()
-        .insert_resource(WindowDescriptor {
-            title: format!(
-                "{} {} - cubes",
-                env!("CARGO_PKG_NAME"),
-                env!("CARGO_PKG_VERSION")
-            ),
-            width: 1280.0,
-            height: 720.0,
-            ..Default::default()
-        })
-        .add_plugins(DefaultPlugins)
+        .add_plugins(DefaultPlugins.set(WindowPlugin {
+            window: WindowDescriptor {
+                title: format!(
+                    "{} {} - cubes",
+                    env!("CARGO_PKG_NAME"),
+                    env!("CARGO_PKG_VERSION")
+                ),
+                width: 1280.0,
+                height: 720.0,
+                ..Default::default()
+            },
+            ..default()
+        }))
         .add_plugin(CameraControllerPlugin)
         .add_plugin(FrameTimeDiagnosticsPlugin)
         .add_plugin(LogDiagnosticsPlugin::default())
@@ -118,10 +121,10 @@ fn setup(mut commands: Commands) {
             });
         }
     }
-    commands.spawn_bundle((cubes,));
+    commands.spawn((cubes,));
 
     commands
-        .spawn_bundle(Camera3dBundle {
+        .spawn(Camera3dBundle {
             transform: Transform::from_translation(100.0 * Vec3::new(-1.0, 1.0, -1.0))
                 .looking_at(0.5 * Vec3::new(dim as f32, 0.0, dim as f32), Vec3::Y),
             ..default()
@@ -129,7 +132,7 @@ fn setup(mut commands: Commands) {
         .insert(CameraController::default());
 }
 
-fn extract_cubes_phase(mut commands: Commands, cameras: Query<Entity, With<Camera3d>>) {
+fn extract_cubes_phase(mut commands: Commands, cameras: Extract<Query<Entity, With<Camera3d>>>) {
     for entity in cameras.iter() {
         commands
             .get_or_spawn(entity)
@@ -137,9 +140,18 @@ fn extract_cubes_phase(mut commands: Commands, cameras: Query<Entity, With<Camer
     }
 }
 
-fn extract_cubes(mut commands: Commands, mut cubes: Query<(Entity, &mut Cubes)>) {
-    for (entity, mut cubes) in cubes.iter_mut() {
-        if cubes.extracted {
+#[derive(Default, Resource)]
+struct ExtractedCubes {
+    entities: HashSet<Entity>,
+}
+
+fn extract_cubes(
+    mut commands: Commands,
+    mut extracted: ResMut<ExtractedCubes>,
+    cubes: Extract<Query<(Entity, &Cubes)>>,
+) {
+    for (entity, cubes) in cubes.iter() {
+        if extracted.entities.contains(&entity) {
             commands.get_or_spawn(entity).insert(Cubes {
                 data: Vec::new(),
                 extracted: true,
@@ -147,7 +159,7 @@ fn extract_cubes(mut commands: Commands, mut cubes: Query<(Entity, &mut Cubes)>)
         } else {
             commands.get_or_spawn(entity).insert(cubes.clone());
             // NOTE: Set this after cloning so we don't extract next time
-            cubes.extracted = true;
+            extracted.entities.insert(entity);
         }
     }
 }
@@ -170,7 +182,7 @@ impl From<&Cube> for GpuCube {
     }
 }
 
-#[derive(Component)]
+#[derive(Resource)]
 struct GpuCubes {
     index_buffer: Option<Buffer>,
     index_count: u32,
@@ -293,18 +305,16 @@ fn queue_cubes(
 
     for mut opaque_phase in views.iter_mut() {
         for entity in cubes_query.iter() {
-            commands
-                .get_or_spawn(entity)
-                .insert_bundle((GpuCubesBindGroup {
-                    bind_group: render_device.create_bind_group(&BindGroupDescriptor {
-                        label: Some("gpu_cubes_bind_group"),
-                        layout: &cubes_pipeline.cubes_layout,
-                        entries: &[BindGroupEntry {
-                            binding: 0,
-                            resource: gpu_cubes.instances.buffer().unwrap().as_entire_binding(),
-                        }],
-                    }),
-                },));
+            commands.get_or_spawn(entity).insert((GpuCubesBindGroup {
+                bind_group: render_device.create_bind_group(&BindGroupDescriptor {
+                    label: Some("gpu_cubes_bind_group"),
+                    layout: &cubes_pipeline.cubes_layout,
+                    entries: &[BindGroupEntry {
+                        binding: 0,
+                        resource: gpu_cubes.instances.buffer().unwrap().as_entire_binding(),
+                    }],
+                }),
+            },));
             opaque_phase.add(CubesPhaseItem {
                 entity,
                 draw_function: draw_cubes,
@@ -365,10 +375,10 @@ impl render_graph::Node for CubesPassNode {
             label: Some("main_cubes_pass"),
             // NOTE: The cubes pass loads the color
             // buffer as well as writing to it.
-            color_attachments: &[target.get_color_attachment(Operations {
+            color_attachments: &[Some(target.get_color_attachment(Operations {
                 load: LoadOp::Load,
                 store: true,
-            })],
+            }))],
             depth_stencil_attachment: Some(RenderPassDepthStencilAttachment {
                 view: &depth.view,
                 // NOTE: The cubes main pass loads the depth buffer and possibly overwrites it
@@ -412,6 +422,7 @@ impl Plugin for CubesPlugin {
             .add_render_command::<CubesPhaseItem, DrawCubes>()
             .init_resource::<CubesPipeline>()
             .init_resource::<GpuCubes>()
+            .init_resource::<ExtractedCubes>()
             .add_system_to_stage(RenderStage::Extract, extract_cubes_phase)
             .add_system_to_stage(RenderStage::Extract, extract_cubes)
             .add_system_to_stage(RenderStage::Prepare, prepare_cubes)
@@ -435,6 +446,7 @@ impl Plugin for CubesPlugin {
     }
 }
 
+#[derive(Resource)]
 struct CubesPipeline {
     pipeline_id: CachedRenderPipelineId,
     cubes_layout: BindGroupLayout,
@@ -496,11 +508,11 @@ impl FromWorld for CubesPipeline {
                 shader: CUBES_SHADER_HANDLE.typed(),
                 shader_defs: vec![],
                 entry_point: "fragment".into(),
-                targets: vec![ColorTargetState {
+                targets: vec![Some(ColorTargetState {
                     format: TextureFormat::bevy_default(),
                     blend: Some(BlendState::REPLACE),
                     write_mask: ColorWrites::ALL,
-                }],
+                })],
             }),
             primitive: PrimitiveState {
                 front_face: FrontFace::Ccw,
