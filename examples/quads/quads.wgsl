@@ -72,8 +72,8 @@ fn vertex(@builtin(vertex_index) vertex_index: u32) -> VertexOutput {
 
         // Offset by the proportion of the screen in x and y. half_extents are in screen pixels in
         // this mode.
-        out.clip_position.x = out.clip_position.x + (quad.half_extents.x / view.width) * relative_pos_unit.x;
-        out.clip_position.y = out.clip_position.y + (quad.half_extents.y / view.height) * relative_pos_unit.y;
+        out.clip_position.x = out.clip_position.x + (quad.half_extents.x / view.viewport.z) * relative_pos_unit.x;
+        out.clip_position.y = out.clip_position.y + (quad.half_extents.y / view.viewport.w) * relative_pos_unit.y;
 
         // Transform back to world coordinates
         out.world_position = view.inverse_projection * out.clip_position;

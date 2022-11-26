@@ -39,17 +39,19 @@ use rand::Rng;
 
 fn main() {
     App::new()
-        .insert_resource(WindowDescriptor {
-            title: format!(
-                "{} {} - quads",
-                env!("CARGO_PKG_NAME"),
-                env!("CARGO_PKG_VERSION")
-            ),
-            width: 1280.0,
-            height: 720.0,
-            ..Default::default()
-        })
-        .add_plugins(DefaultPlugins)
+        .add_plugins(DefaultPlugins.set(WindowPlugin {
+            window: WindowDescriptor {
+                title: format!(
+                    "{} {} - quads",
+                    env!("CARGO_PKG_NAME"),
+                    env!("CARGO_PKG_VERSION")
+                ),
+                width: 1280.0,
+                height: 720.0,
+                ..Default::default()
+            },
+            ..default()
+        }))
         .add_plugin(CameraControllerPlugin)
         .add_plugin(FrameTimeDiagnosticsPlugin)
         .add_plugin(LogDiagnosticsPlugin::default())
@@ -102,14 +104,14 @@ fn random_point_vec3<R: Rng + ?Sized>(rng: &mut R, min: Vec3, max: Vec3) -> Vec3
     )
 }
 
-#[derive(Clone, Debug, Default, ExtractResource)]
+#[derive(Clone, Debug, Default, Resource, ExtractResource)]
 struct Quads {
     data: Vec<Quad>,
 }
 
 fn setup(mut commands: Commands) {
     commands
-        .spawn_bundle(Camera3dBundle {
+        .spawn(Camera3dBundle {
             transform: Transform::from_translation(50.0 * Vec3::Z).looking_at(Vec3::ZERO, Vec3::Y),
             ..default()
         })
@@ -179,6 +181,7 @@ impl From<&Quad> for GpuQuad {
     }
 }
 
+#[derive(Resource)]
 struct GpuQuads {
     index_buffer: Option<Buffer>,
     index_count: u32,
@@ -431,6 +434,7 @@ impl Plugin for QuadsPlugin {
     }
 }
 
+#[derive(Resource)]
 struct QuadsPipeline {
     pipeline_id: CachedRenderPipelineId,
     quads_layout: BindGroupLayout,
