@@ -25,8 +25,9 @@ use bevy::{
         renderer::{RenderContext, RenderDevice, RenderQueue},
         texture::BevyDefault,
         view::{ExtractedView, ViewDepthTexture, ViewTarget, ViewUniform},
-        RenderApp, RenderStage,
+        Extract, RenderApp, RenderStage,
     },
+    utils::HashSet,
 };
 use bevy_vertex_pulling::Instances;
 use bytemuck::{cast_slice, Pod, Zeroable};
@@ -35,17 +36,19 @@ use rand::Rng;
 
 fn main() {
     App::new()
-        .insert_resource(WindowDescriptor {
-            title: format!(
-                "{} {} - quads",
-                env!("CARGO_PKG_NAME"),
-                env!("CARGO_PKG_VERSION")
-            ),
-            width: 1280.0,
-            height: 720.0,
-            ..Default::default()
-        })
-        .add_plugins(DefaultPlugins)
+        .add_plugins(DefaultPlugins.set(WindowPlugin {
+            window: WindowDescriptor {
+                title: format!(
+                    "{} {} - quads-instanced",
+                    env!("CARGO_PKG_NAME"),
+                    env!("CARGO_PKG_VERSION")
+                ),
+                width: 1280.0,
+                height: 720.0,
+                ..Default::default()
+            },
+            ..default()
+        }))
         .add_plugin(CameraControllerPlugin)
         .add_plugin(FrameTimeDiagnosticsPlugin)
         .add_plugin(LogDiagnosticsPlugin::default())
@@ -81,7 +84,7 @@ impl From<&Quad2d> for GpuQuad2d {
 
 fn setup(mut commands: Commands) {
     commands
-        .spawn_bundle(Camera3dBundle {
+        .spawn(Camera3dBundle {
             transform: Transform::from_translation(50.0 * Vec3::Z).looking_at(Vec3::ZERO, Vec3::Y),
             ..default()
         })
@@ -99,10 +102,10 @@ fn setup(mut commands: Commands) {
     for _ in 0..n_quads {
         quads.values.push(random_quad2d(&mut rng, min, max, 0.01));
     }
-    commands.spawn_bundle((quads,));
+    commands.spawn((quads,));
 }
 
-fn extract_quads_phase(mut commands: Commands, cameras: Query<Entity, With<Camera3d>>) {
+fn extract_quads_phase(mut commands: Commands, cameras: Extract<Query<Entity, With<Camera3d>>>) {
     for entity in cameras.iter() {
         commands
             .get_or_spawn(entity)
@@ -110,9 +113,18 @@ fn extract_quads_phase(mut commands: Commands, cameras: Query<Entity, With<Camer
     }
 }
 
-fn extract_quads(mut commands: Commands, mut quads: Query<(Entity, &mut Instances<Quad2d>)>) {
-    for (entity, mut quads) in quads.iter_mut() {
-        if quads.extracted {
+#[derive(Default, Resource)]
+struct ExtractedQuads {
+    entities: HashSet<Entity>,
+}
+
+fn extract_quads(
+    mut commands: Commands,
+    mut extracted: ResMut<ExtractedQuads>,
+    quads: Extract<Query<(Entity, &Instances<Quad2d>)>>,
+) {
+    for (entity, quads) in quads.iter() {
+        if extracted.entities.contains(&entity) {
             commands.get_or_spawn(entity).insert(Instances::<Quad2d> {
                 values: Vec::new(),
                 extracted: true,
@@ -120,12 +132,12 @@ fn extract_quads(mut commands: Commands, mut quads: Query<(Entity, &mut Instance
         } else {
             commands.get_or_spawn(entity).insert(quads.clone());
             // NOTE: Set this after cloning so we don't extract next time
-            quads.extracted = true;
+            extracted.entities.insert(entity);
         }
     }
 }
 
-#[derive(Component)]
+#[derive(Resource)]
 struct GpuQuads {
     index_buffer: Option<Buffer>,
     index_count: u32,
@@ -278,10 +290,10 @@ impl render_graph::Node for QuadsPassNode {
             label: Some("main_quads_pass"),
             // NOTE: The quads pass loads the color
             // buffer as well as writing to it.
-            color_attachments: &[target.get_color_attachment(Operations {
+            color_attachments: &[Some(target.get_color_attachment(Operations {
                 load: LoadOp::Load,
                 store: true,
-            })],
+            }))],
             depth_stencil_attachment: Some(RenderPassDepthStencilAttachment {
                 view: &depth.view,
                 // NOTE: The quads main pass loads the depth buffer and possibly overwrites it
@@ -325,6 +337,7 @@ impl Plugin for QuadsPlugin {
             .add_render_command::<QuadsPhaseItem, DrawQuads>()
             .init_resource::<QuadsPipeline>()
             .init_resource::<GpuQuads>()
+            .init_resource::<ExtractedQuads>()
             .add_system_to_stage(RenderStage::Extract, extract_quads_phase)
             .add_system_to_stage(RenderStage::Extract, extract_quads)
             .add_system_to_stage(RenderStage::Prepare, prepare_quads)
@@ -348,6 +361,7 @@ impl Plugin for QuadsPlugin {
     }
 }
 
+#[derive(Resource)]
 struct QuadsPipeline {
     pipeline_id: CachedRenderPipelineId,
 }
@@ -411,11 +425,11 @@ impl FromWorld for QuadsPipeline {
                 shader: QUADS_SHADER_HANDLE.typed(),
                 shader_defs: vec![],
                 entry_point: "fragment".into(),
-                targets: vec![ColorTargetState {
+                targets: vec![Some(ColorTargetState {
                     format: TextureFormat::bevy_default(),
                     blend: Some(BlendState::REPLACE),
                     write_mask: ColorWrites::ALL,
-                }],
+                })],
             }),
             primitive: PrimitiveState {
                 front_face: FrontFace::Ccw,
