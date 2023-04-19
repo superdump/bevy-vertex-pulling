@@ -1,20 +1,24 @@
 use bevy::{
     core_pipeline::core_3d,
     diagnostic::{FrameTimeDiagnosticsPlugin, LogDiagnosticsPlugin},
-    ecs::system::{
-        lifetimeless::{Read, SQuery, SRes},
-        SystemParamItem,
+    ecs::{
+        query::ROQueryItem,
+        system::{
+            lifetimeless::{Read, SRes},
+            SystemParamItem,
+        },
     },
-    pbr::LightMeta,
     prelude::*,
     reflect::TypeUuid,
     render::{
+        camera::ExtractedCamera,
         extract_resource::{ExtractResource, ExtractResourcePlugin},
         mesh::PrimitiveTopology,
         render_graph::{self, NodeRunError, RenderGraph, RenderGraphContext, SlotInfo, SlotType},
         render_phase::{
-            AddRenderCommand, DrawFunctionId, DrawFunctions, PhaseItem, RenderCommand,
-            RenderCommandResult, RenderPhase, TrackedRenderPass,
+            AddRenderCommand, CachedRenderPipelinePhaseItem, DrawFunctionId, DrawFunctions,
+            PhaseItem, RenderCommand, RenderCommandResult, RenderPhase, SetItemPipeline,
+            TrackedRenderPass,
         },
         render_resource::{
             BindGroup, BindGroupDescriptor, BindGroupEntry, BindGroupLayout,
@@ -29,8 +33,11 @@ use bevy::{
         },
         renderer::{RenderContext, RenderDevice, RenderQueue},
         texture::BevyDefault,
-        view::{ExtractedView, ViewDepthTexture, ViewTarget, ViewUniform, ViewUniformOffset},
-        Extract, RenderApp, RenderStage,
+        view::{
+            ExtractedView, ViewDepthTexture, ViewTarget, ViewUniform, ViewUniformOffset,
+            ViewUniforms,
+        },
+        Extract, RenderApp, RenderSet,
     },
 };
 use bytemuck::cast_slice;
@@ -40,16 +47,15 @@ use rand::Rng;
 fn main() {
     App::new()
         .add_plugins(DefaultPlugins.set(WindowPlugin {
-            window: WindowDescriptor {
+            primary_window: Some(Window {
                 title: format!(
                     "{} {} - quads",
                     env!("CARGO_PKG_NAME"),
                     env!("CARGO_PKG_VERSION")
                 ),
-                width: 1280.0,
-                height: 720.0,
+                resolution: (1280.0, 720.0).into(),
                 ..Default::default()
-            },
+            }),
             ..default()
         }))
         .add_plugin(CameraControllerPlugin)
@@ -174,7 +180,7 @@ impl From<&Quad> for GpuQuad {
                 Billboard::WorldY => GpuQuadFlags::BILLBOARD | GpuQuadFlags::BILLBOARD_WORLD_Y,
                 Billboard::FixedScreenSize => GpuQuadFlags::BILLBOARD_FIXED_SCREEN_SIZE,
             }
-            .bits,
+            .bits(),
             half_extents: quad.half_extents.extend(0.0),
             color: quad.color.as_rgba_f32(),
         }
@@ -207,6 +213,9 @@ impl Default for GpuQuads {
         }
     }
 }
+
+#[derive(Component)]
+struct GpuQuadsMarker;
 
 fn prepare_quads(
     mut commands: Commands,
@@ -259,11 +268,14 @@ fn prepare_quads(
                 commands.insert_resource(new_gpu_quads);
             }
         }
+        commands.spawn(GpuQuadsMarker);
     }
 }
 
 pub struct QuadsPhaseItem {
     pub draw_function: DrawFunctionId,
+    pub entity: Entity,
+    pub pipeline: CachedRenderPipelineId,
 }
 
 impl PhaseItem for QuadsPhaseItem {
@@ -278,21 +290,50 @@ impl PhaseItem for QuadsPhaseItem {
     fn draw_function(&self) -> DrawFunctionId {
         self.draw_function
     }
+
+    fn entity(&self) -> Entity {
+        self.entity
+    }
+}
+
+impl CachedRenderPipelinePhaseItem for QuadsPhaseItem {
+    fn cached_pipeline(&self) -> CachedRenderPipelineId {
+        self.pipeline
+    }
+}
+
+#[derive(Resource)]
+pub struct GpuQuadsViewBindGroup {
+    bind_group: BindGroup,
 }
 
 fn queue_quads(
+    mut commands: Commands,
     opaque_3d_draw_functions: Res<DrawFunctions<QuadsPhaseItem>>,
     quads_pipeline: Res<QuadsPipeline>,
     render_device: Res<RenderDevice>,
-    gpu_quads: Option<ResMut<GpuQuads>>,
+    view_uniforms: Res<ViewUniforms>,
+    mut gpu_quads: Option<ResMut<GpuQuads>>,
+    entities: Query<Entity, With<GpuQuadsMarker>>,
     mut views: Query<&mut RenderPhase<QuadsPhaseItem>>,
 ) {
-    if let Some(mut gpu_quads) = gpu_quads {
-        let draw_quads = opaque_3d_draw_functions
-            .read()
-            .get_id::<DrawQuads>()
-            .unwrap();
+    let draw_quads = opaque_3d_draw_functions
+        .read()
+        .get_id::<DrawQuads>()
+        .unwrap();
 
+    commands.insert_resource(GpuQuadsViewBindGroup {
+        bind_group: render_device.create_bind_group(&BindGroupDescriptor {
+            label: Some("gpu_quads_view_bind_group"),
+            layout: &quads_pipeline.view_layout,
+            entries: &[BindGroupEntry {
+                binding: 0,
+                resource: view_uniforms.uniforms.binding().unwrap(),
+            }],
+        }),
+    });
+
+    if let Some(gpu_quads) = gpu_quads.as_mut() {
         if gpu_quads.is_changed() {
             println!("GpuQuads changed");
             gpu_quads.bind_group = Some(render_device.create_bind_group(&BindGroupDescriptor {
@@ -304,10 +345,14 @@ fn queue_quads(
                 }],
             }));
         }
+    }
 
+    for entity in &entities {
         for mut opaque_phase in views.iter_mut() {
             opaque_phase.add(QuadsPhaseItem {
+                entity,
                 draw_function: draw_quads,
+                pipeline: quads_pipeline.pipeline_id,
             });
         }
     }
@@ -320,6 +365,7 @@ mod node {
 pub struct QuadsPassNode {
     query: QueryState<
         (
+            &'static ExtractedCamera,
             &'static RenderPhase<QuadsPhaseItem>,
             &'static ViewTarget,
             &'static ViewDepthTexture,
@@ -354,7 +400,7 @@ impl render_graph::Node for QuadsPassNode {
         world: &World,
     ) -> Result<(), NodeRunError> {
         let view_entity = graph.get_input_entity(Self::IN_VIEW)?;
-        let (quads_phase, target, depth) = match self.query.get_manual(world, view_entity) {
+        let (camera, quads_phase, target, depth) = match self.query.get_manual(world, view_entity) {
             Ok(query) => query,
             Err(_) => return Ok(()), // No window
         };
@@ -380,17 +426,13 @@ impl render_graph::Node for QuadsPassNode {
             }),
         };
 
-        let draw_functions = world.resource::<DrawFunctions<QuadsPhaseItem>>();
+        let mut render_pass = render_context.begin_tracked_render_pass(pass_descriptor);
 
-        let render_pass = render_context
-            .command_encoder
-            .begin_render_pass(&pass_descriptor);
-        let mut draw_functions = draw_functions.write();
-        let mut tracked_pass = TrackedRenderPass::new(render_pass);
-        for item in &quads_phase.items {
-            let draw_function = draw_functions.get_mut(item.draw_function).unwrap();
-            draw_function.draw(world, &mut tracked_pass, view_entity, item);
+        if let Some(viewport) = camera.viewport.as_ref() {
+            render_pass.set_camera_viewport(viewport);
         }
+
+        quads_phase.render(&mut render_pass, world, view_entity);
 
         Ok(())
     }
@@ -412,31 +454,28 @@ impl Plugin for QuadsPlugin {
             .init_resource::<DrawFunctions<QuadsPhaseItem>>()
             .add_render_command::<QuadsPhaseItem, DrawQuads>()
             .init_resource::<QuadsPipeline>()
-            .add_system_to_stage(RenderStage::Extract, extract_quads_phase)
-            .add_system_to_stage(RenderStage::Prepare, prepare_quads)
-            .add_system_to_stage(RenderStage::Queue, queue_quads);
+            .add_system(extract_quads_phase.in_schedule(ExtractSchedule))
+            .add_system(prepare_quads.in_set(RenderSet::Prepare))
+            .add_system(queue_quads.in_set(RenderSet::Queue));
 
         let quads_pass_node = QuadsPassNode::new(&mut render_app.world);
         let mut graph = render_app.world.resource_mut::<RenderGraph>();
         let draw_3d_graph = graph.get_sub_graph_mut(core_3d::graph::NAME).unwrap();
         draw_3d_graph.add_node(node::QUADS_PASS, quads_pass_node);
-        draw_3d_graph
-            .add_node_edge(core_3d::graph::node::MAIN_PASS, node::QUADS_PASS)
-            .unwrap();
-        draw_3d_graph
-            .add_slot_edge(
-                draw_3d_graph.input_node().unwrap().id,
-                core_3d::graph::input::VIEW_ENTITY,
-                node::QUADS_PASS,
-                QuadsPassNode::IN_VIEW,
-            )
-            .unwrap();
+        draw_3d_graph.add_node_edge(core_3d::graph::node::MAIN_PASS, node::QUADS_PASS);
+        draw_3d_graph.add_slot_edge(
+            draw_3d_graph.input_node().id,
+            core_3d::graph::input::VIEW_ENTITY,
+            node::QUADS_PASS,
+            QuadsPassNode::IN_VIEW,
+        );
     }
 }
 
 #[derive(Resource)]
 struct QuadsPipeline {
     pipeline_id: CachedRenderPipelineId,
+    view_layout: BindGroupLayout,
     quads_layout: BindGroupLayout,
 }
 
@@ -482,10 +521,10 @@ impl FromWorld for QuadsPipeline {
                     }],
                 });
 
-        let mut pipeline_cache = world.resource_mut::<PipelineCache>();
+        let pipeline_cache = world.resource_mut::<PipelineCache>();
         let pipeline_id = pipeline_cache.queue_render_pipeline(RenderPipelineDescriptor {
             label: Some("quads_pipeline".into()),
-            layout: Some(vec![view_layout, quads_layout.clone()]),
+            layout: vec![view_layout.clone(), quads_layout.clone()],
             vertex: VertexState {
                 shader: QUADS_SHADER_HANDLE.typed(),
                 shader_defs: vec![],
@@ -528,67 +567,45 @@ impl FromWorld for QuadsPipeline {
                 },
             }),
             multisample: MultisampleState {
-                count: Msaa::default().samples,
+                count: Msaa::default().samples(),
                 mask: !0,
                 alpha_to_coverage_enabled: false,
             },
+            push_constant_ranges: vec![],
         });
 
         Self {
             pipeline_id,
+            view_layout,
             quads_layout,
         }
     }
 }
 
 type DrawQuads = (
-    SetQuadsPipeline,
-    SetQuadsShadowViewBindGroup<0>,
+    SetItemPipeline,
+    SetQuadsViewBindGroup<0>,
     SetGpuQuadsBindGroup<1>,
     DrawVertexPulledQuads,
 );
 
-struct SetQuadsPipeline;
-impl<P: PhaseItem> RenderCommand<P> for SetQuadsPipeline {
-    type Param = (SRes<PipelineCache>, SRes<QuadsPipeline>);
-    #[inline]
-    fn render<'w>(
-        _view: Entity,
-        _item: &P,
-        params: SystemParamItem<'w, '_, Self::Param>,
-        pass: &mut TrackedRenderPass<'w>,
-    ) -> RenderCommandResult {
-        let (pipeline_cache, quads_pipeline) = params;
-        if let Some(pipeline) = pipeline_cache
-            .into_inner()
-            .get_render_pipeline(quads_pipeline.pipeline_id)
-        {
-            pass.set_render_pipeline(pipeline);
-            RenderCommandResult::Success
-        } else {
-            RenderCommandResult::Failure
-        }
-    }
-}
+pub struct SetQuadsViewBindGroup<const I: usize>;
+impl<const I: usize, P: PhaseItem> RenderCommand<P> for SetQuadsViewBindGroup<I> {
+    type Param = SRes<GpuQuadsViewBindGroup>;
+    type ViewWorldQuery = Read<ViewUniformOffset>;
+    type ItemWorldQuery = ();
 
-pub struct SetQuadsShadowViewBindGroup<const I: usize>;
-impl<const I: usize, P: PhaseItem> RenderCommand<P> for SetQuadsShadowViewBindGroup<I> {
-    type Param = (SRes<LightMeta>, SQuery<Read<ViewUniformOffset>>);
     #[inline]
     fn render<'w>(
-        view: Entity,
         _item: &P,
-        (light_meta, view_query): SystemParamItem<'w, '_, Self::Param>,
+        view_uniform_offset: ROQueryItem<'w, Self::ViewWorldQuery>,
+        _entity: ROQueryItem<'w, Self::ItemWorldQuery>,
+        view_bind_group: SystemParamItem<'w, '_, Self::Param>,
         pass: &mut TrackedRenderPass<'w>,
     ) -> RenderCommandResult {
-        let view_uniform_offset = view_query.get(view).unwrap();
         pass.set_bind_group(
             I,
-            light_meta
-                .into_inner()
-                .shadow_view_bind_group
-                .as_ref()
-                .unwrap(),
+            &view_bind_group.into_inner().bind_group,
             &[view_uniform_offset.offset],
         );
 
@@ -599,16 +616,18 @@ impl<const I: usize, P: PhaseItem> RenderCommand<P> for SetQuadsShadowViewBindGr
 struct SetGpuQuadsBindGroup<const I: usize>;
 impl<const I: usize, P: PhaseItem> RenderCommand<P> for SetGpuQuadsBindGroup<I> {
     type Param = SRes<GpuQuads>;
+    type ViewWorldQuery = ();
+    type ItemWorldQuery = ();
 
     #[inline]
     fn render<'w>(
-        _view: Entity,
         _item: &P,
+        _view: ROQueryItem<'w, Self::ViewWorldQuery>,
+        _entity: ROQueryItem<'w, Self::ItemWorldQuery>,
         gpu_quads: SystemParamItem<'w, '_, Self::Param>,
         pass: &mut TrackedRenderPass<'w>,
     ) -> RenderCommandResult {
-        let gpu_quads = gpu_quads.into_inner();
-        pass.set_bind_group(I, gpu_quads.bind_group.as_ref().unwrap(), &[]);
+        pass.set_bind_group(I, gpu_quads.into_inner().bind_group.as_ref().unwrap(), &[]);
 
         RenderCommandResult::Success
     }
@@ -617,11 +636,14 @@ impl<const I: usize, P: PhaseItem> RenderCommand<P> for SetGpuQuadsBindGroup<I> 
 struct DrawVertexPulledQuads;
 impl<P: PhaseItem> RenderCommand<P> for DrawVertexPulledQuads {
     type Param = SRes<GpuQuads>;
+    type ViewWorldQuery = ();
+    type ItemWorldQuery = ();
 
     #[inline]
     fn render<'w>(
-        _view: Entity,
         _item: &P,
+        _view: ROQueryItem<'w, Self::ViewWorldQuery>,
+        _entity: ROQueryItem<'w, Self::ItemWorldQuery>,
         gpu_quads: SystemParamItem<'w, '_, Self::Param>,
         pass: &mut TrackedRenderPass<'w>,
     ) -> RenderCommandResult {

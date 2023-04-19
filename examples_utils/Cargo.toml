@@ -9,4 +9,4 @@ license = "MIT OR Apache-2.0"
 keywords = ["bevy"]
 
 [dependencies]
-bevy = "0.9"
+bevy = "0.10"

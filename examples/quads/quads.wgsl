@@ -1,4 +1,4 @@
-#import bevy_pbr::mesh_view_types
+#import bevy_render::view
 
 struct Quad {
     center: vec3<f32>,
@@ -7,9 +7,9 @@ struct Quad {
     color: vec4<f32>,
 }
 
-let QUAD_FLAG_BILLBOARD_BIT: u32 = 1u;
-let QUAD_FLAG_BILLBOARD_WORLD_Y_BIT: u32 = 2u;
-let QUAD_FLAG_BILLBOARD_FIXED_SCREEN_SIZE_BIT: u32 = 4u;
+const QUAD_FLAG_BILLBOARD_BIT: u32 = 1u;
+const QUAD_FLAG_BILLBOARD_WORLD_Y_BIT: u32 = 2u;
+const QUAD_FLAG_BILLBOARD_FIXED_SCREEN_SIZE_BIT: u32 = 4u;
 
 struct Quads {
     data: array<Quad>,
